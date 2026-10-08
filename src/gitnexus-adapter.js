@@ -42,17 +42,18 @@ export class GitNexusAdapter {
     return parseJsonOutput(result.stdout);
   }
 
-  async registerExisting(repoPath) {
-    if (this.registrationPromises.has(repoPath)) return this.registrationPromises.get(repoPath);
-    const registration = this.#registerExisting(repoPath).catch((error) => {
-      this.registrationPromises.delete(repoPath);
+  async registerExisting(repoPath, alias = path.basename(repoPath)) {
+    const key = `${repoPath}\0${alias}`;
+    if (this.registrationPromises.has(key)) return this.registrationPromises.get(key);
+    const registration = this.#registerExisting(repoPath, alias).catch((error) => {
+      this.registrationPromises.delete(key);
       throw error;
     });
-    this.registrationPromises.set(repoPath, registration);
+    this.registrationPromises.set(key, registration);
     return registration;
   }
 
-  async #registerExisting(repoPath) {
+  async #registerExisting(repoPath, alias) {
     const storagePath = path.join(repoPath, '.gitnexus');
     for (const fileName of ['meta.json', 'gitnexus.json']) {
       const metadataPath = path.join(storagePath, fileName);
@@ -63,6 +64,20 @@ export class GitNexusAdapter {
       await fs.writeFile(temporary, JSON.stringify(metadata, null, 2), { mode: 0o600 });
       await fs.rename(temporary, metadataPath);
     }
+    if (path.basename(repoPath) !== alias) {
+      throw new WorkerError('ENGINE_INDEX_INVALID', 'Restored GitNexus repository path does not match its registry alias');
+    }
+    // GitNexus 1.6.12 `index` has no `--name` option and otherwise infers the
+    // registry name from origin. Point the isolated working copy at a
+    // synthetic local identity whose basename is the job-scoped alias. This
+    // never mutates the source repository or performs network I/O.
+    // Published graph artifacts intentionally contain only `.gitnexus`, not source or
+    // repository history. Create an empty ephemeral Git worktree solely so GitNexus
+    // can derive the stable registry identity while re-registering the restored index.
+    await runProcess('git', ['-C', repoPath, 'init'], { timeoutMs: this.config.queryTimeoutMs });
+    await runProcess('git', ['-C', repoPath, 'config', 'remote.origin.url', `file:///gitnexus-restored/${alias}.git`], {
+      timeoutMs: this.config.queryTimeoutMs,
+    });
     await runProcess(this.config.gitnexusBin, ['index', '--allow-non-git', repoPath], {
       env: this.env,
       timeoutMs: this.config.queryTimeoutMs,
@@ -70,12 +85,15 @@ export class GitNexusAdapter {
     return repoPath;
   }
 
-  async validate(alias, expectedCommit) {
+  async validate(alias, expectedCommit, allowRestoredIdentity = false) {
     const status = await this.status(alias);
     const actualCommit = status.index?.commit ?? status.current?.commit ?? status.lastCommit ?? status.commit ?? status.indexedCommit;
     const runnerIdentityStatus = status.index?.runnerIdentityStatus ?? status.runnerIdentityStatus;
+    const restoredCliVersion = status.index?.runnerIdentity?.cliVersion ?? status.runnerIdentity?.cliVersion;
     const incompleteReasons = status.index?.incompleteReasons ?? status.incompleteReasons ?? [];
-    if (actualCommit !== expectedCommit || runnerIdentityStatus !== 'current' || incompleteReasons.length > 0) {
+    const identityAccepted = runnerIdentityStatus === 'current'
+      || (allowRestoredIdentity && runnerIdentityStatus === 'stale-or-unknown' && restoredCliVersion === this.config.gitnexusVersion);
+    if (actualCommit !== expectedCommit || !identityAccepted || incompleteReasons.length > 0) {
       throw new WorkerError('ENGINE_INDEX_INVALID', 'GitNexus status validation failed', { details: { status, expectedCommit } });
     }
     await this.query(alias, 'main application entry workflow', 1);

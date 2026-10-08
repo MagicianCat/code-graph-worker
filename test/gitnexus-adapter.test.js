@@ -30,6 +30,24 @@ test('validates the nested GitNexus 1.6.12 status shape', async () => {
   assert.equal(status.index.commit, 'a'.repeat(40));
 });
 
+test('accepts a restored exact index only when its recorded CLI version matches', async () => {
+  const adapter = new GitNexusAdapter({
+    gitnexusHome: '/tmp/test', gitnexusBin: 'gitnexus', gitnexusVersion: '1.6.12', workerPoolSize: 1, queryTimeoutMs: 1000,
+  });
+  adapter.status = async () => ({
+    storagePath: '/tmp/repo/.gitnexus',
+    index: {
+      commit: 'a'.repeat(40), runnerIdentityStatus: 'stale-or-unknown', incompleteReasons: [],
+      runnerIdentity: { cliVersion: '1.6.12' },
+    },
+    current: { commit: 'a'.repeat(40) },
+  });
+  adapter.query = async () => ({ definitions: [] });
+  await assert.rejects(() => adapter.validate('repo', 'a'.repeat(40)), /validation failed/);
+  const status = await adapter.validate('repo', 'a'.repeat(40), true);
+  assert.equal(status.index.runnerIdentity.cliVersion, '1.6.12');
+});
+
 test('executes the pinned adapter operations with argument arrays', async () => {
   const { root, adapter } = await fakeAdapter();
   assert.equal(await adapter.version(), '1.6.12');

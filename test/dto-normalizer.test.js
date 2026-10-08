@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeQuery, normalizeContext, normalizeImpact, normalizeTrace } from '../src/dto-normalizer.js';
+import { normalizeQuery, normalizeContext, normalizeImpact, normalizeOverview, normalizeRouteMap, normalizeTrace } from '../src/dto-normalizer.js';
 
 test('normalizes GitNexus definitions and de-duplicates symbols', () => {
   const raw = {
@@ -42,4 +42,11 @@ test('normalizes context directions into relations', () => {
   }, 'backend');
   assert.deepEqual(result.relations.map((item) => item.type), ['IMPORTS', 'CONTAINS']);
   assert.equal(result.relations[0].toUid, 'Class:a.java:A');
+});
+
+test('normalizes overview and redacts absolute engine paths in route map', () => {
+  const overview = normalizeOverview({ engine: 'GITNEXUS', engineVersion: '1.6.12', adapterVersion: '0.1.0', repositories: [{ logicalName: 'backend', repositoryKey: 'b', commitSha: 'a'.repeat(40), treeSha: 'b'.repeat(40), nodeCount: 3, edgeCount: 4 }] });
+  assert.equal(overview.repositoryCount, 1);
+  const routes = normalizeRouteMap({ routeNormalization: { associations: [{ originalContractId: 'http::GET::/x', normalizedContractId: 'http::GET::/x', consumer: { repository: 'frontend', symbolUid: 'Function:x', symbolRef: { filePath: '/private/tmp/source/a.ts', name: 'x' } }, provider: null, status: 'UNRESOLVED', confidence: 0 }] } });
+  assert.equal(routes.routes[0].consumer.symbolRef.filePath, '');
 });

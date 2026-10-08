@@ -38,3 +38,48 @@ test('validates graph selectors and route references', () => {
   value.options = { httpRoutePrefixes: { missing: '/api' } };
   assert.throws(() => validateBuildRequest(value), /unknown repository/);
 });
+
+test('accepts a mixed reuse plan with exact, incremental and full repository decisions', () => {
+  const value = request();
+  value.buildMode = 'MIXED';
+  value.baseBundleArtifactUri = 'file:///data/code-graph/artifacts/base.tar.zst';
+  value.baseBundleSha256 = 'd'.repeat(64);
+  value.reusePlan = { repositories: { backend: { mode: 'EXACT', baseCommitSha: 'a'.repeat(40), baseTreeSha: 'b'.repeat(40) } } };
+  assert.equal(validateBuildRequest(value).buildMode, 'MIXED');
+});
+
+test('rejects incremental reuse without a base bundle and ancestor identity', () => {
+  const value = request();
+  value.buildMode = 'INCREMENTAL';
+  value.reusePlan = { repositories: { backend: { mode: 'INCREMENTAL' } } };
+  assert.throws(() => validateBuildRequest(value), /base bundle|baseCommitSha/);
+});
+
+test('rejects reuse plan entries for repositories not in the request', () => {
+  const value = request();
+  value.buildMode = 'MIXED';
+  value.baseBundleArtifactUri = 'file:///data/code-graph/artifacts/base.tar.zst';
+  value.baseBundleSha256 = 'd'.repeat(64);
+  value.reusePlan = { repositories: { missing: { mode: 'EXACT', baseCommitSha: 'a'.repeat(40), baseTreeSha: 'b'.repeat(40) } } };
+  assert.throws(() => validateBuildRequest(value), /unknown repository/);
+});
+
+test('accepts per-repository base artifacts from different historical bundles', () => {
+  const value = request();
+  value.repositories.push({ ...value.repositories[0], logicalName: 'frontend', repositoryKey: 'frontend', commitSha: 'e'.repeat(40), treeSha: 'f'.repeat(40) });
+  value.buildMode = 'MIXED';
+  value.reusePlan = { repositories: {
+    backend: { mode: 'EXACT', baseCommitSha: 'a'.repeat(40), baseTreeSha: 'b'.repeat(40), baseArtifactUri: 'file:///data/a.tar.zst', baseArtifactSha256: 'd'.repeat(64), baseArtifactRepositoryAlias: 'backend-old' },
+    frontend: { mode: 'INCREMENTAL', baseCommitSha: 'c'.repeat(40), baseTreeSha: 'd'.repeat(40), baseArtifactUri: 'file:///data/b.tar.zst', baseArtifactSha256: 'e'.repeat(64), baseArtifactRepositoryAlias: 'frontend-old' },
+  } };
+  assert.equal(validateBuildRequest(value).reusePlan.repositories.frontend.baseArtifactRepositoryAlias, 'frontend-old');
+});
+
+test('accepts a subset whose historical artifact alias differs from current logical name', () => {
+  const value = request();
+  value.buildMode = 'INCREMENTAL';
+  value.reusePlan = { repositories: {
+    backend: { mode: 'INCREMENTAL', baseCommitSha: 'a'.repeat(40), baseTreeSha: 'b'.repeat(40), baseArtifactUri: 'file:///data/group-abc.tar.zst', baseArtifactSha256: 'd'.repeat(64), baseArtifactRepositoryAlias: 'api-service' },
+  } };
+  assert.equal(validateBuildRequest(value).reusePlan.repositories.backend.baseArtifactRepositoryAlias, 'api-service');
+});

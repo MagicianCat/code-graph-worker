@@ -8,6 +8,18 @@ function kindFromUid(uid = '') {
   return KIND_MAP.get(uid.split(':', 1)[0]) ?? 'UNKNOWN';
 }
 
+// Engine paths are only useful to callers as repository-relative locations.
+// Never let an absolute path (or a traversal segment emitted by an engine)
+// cross the worker boundary.
+function safeFilePath(value) {
+  if (value == null || value === '') return '';
+  const raw = String(value).replaceAll('\\', '/');
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) return '';
+  const normalized = raw.split('/').filter(Boolean).join('/');
+  if (!normalized || normalized.split('/').includes('..')) return '';
+  return normalized;
+}
+
 export function normalizeSymbol(raw, repository, score = null) {
   const uid = raw.uid ?? raw.id ?? '';
   return {
@@ -16,11 +28,76 @@ export function normalizeSymbol(raw, repository, score = null) {
     name: raw.name ?? uid,
     qualifiedName: raw.qualifiedName ?? null,
     repository,
-    filePath: raw.filePath ?? '',
+    filePath: safeFilePath(raw.filePath),
     startLine: raw.startLine ?? null,
     endLine: raw.endLine ?? null,
     score: score ?? raw.score ?? null,
-    metadata: Object.fromEntries(Object.entries(raw).filter(([key]) => !['uid', 'id', 'kind', 'name', 'qualifiedName', 'filePath', 'startLine', 'endLine', 'score'].includes(key))),
+    metadata: safeSymbolMetadata(raw),
+  };
+}
+
+function safeSymbolMetadata(raw) {
+  // Engine output is untrusted at this boundary. Keep only stable scalar fields that
+  // cannot disclose worker paths, index locations or nested engine internals.
+  const allowed = ['language', 'visibility', 'signature', 'returnType', 'deprecated', 'abstract', 'static'];
+  return Object.fromEntries(allowed
+    .filter((key) => ['string', 'number', 'boolean'].includes(typeof raw[key]))
+    .map((key) => [key, raw[key]]));
+}
+
+export function normalizeOverview(metadata) {
+  const repositories = (metadata.repositories ?? []).map((repository) => ({
+    logicalName: repository.logicalName,
+    repositoryKey: repository.repositoryKey,
+    commitSha: repository.commitSha,
+    treeSha: repository.treeSha,
+    buildMode: repository.buildMode ?? 'FULL',
+    baseCommitSha: repository.baseCommitSha ?? null,
+    nodeCount: Number.isFinite(repository.nodeCount) ? repository.nodeCount : null,
+    edgeCount: Number.isFinite(repository.edgeCount) ? repository.edgeCount : null,
+  }));
+  return {
+    schemaVersion: 1,
+    engine: metadata.engine,
+    engineVersion: metadata.engineVersion,
+    adapterVersion: metadata.adapterVersion,
+    repositoryCount: repositories.length,
+    repositories,
+    group: metadata.group ? {
+      engineCrossLinkCount: Number.isFinite(metadata.group.engineCrossLinkCount) ? metadata.group.engineCrossLinkCount : 0,
+    } : null,
+    routeNormalization: metadata.routeNormalization ? {
+      version: metadata.routeNormalization.version ?? 1,
+      explicitLinkCount: metadata.routeNormalization.explicitLinkCount ?? 0,
+      resolvedLinkCount: metadata.routeNormalization.resolvedLinkCount ?? 0,
+    } : null,
+  };
+}
+
+export function normalizeRouteMap(metadata, limit = 500) {
+  const associations = metadata.routeNormalization?.associations ?? [];
+  const routes = associations.slice(0, limit).map((association) => ({
+    originalContractId: association.originalContractId ?? null,
+    normalizedContractId: association.normalizedContractId ?? null,
+    consumer: normalizeRouteEndpoint(association.consumer),
+    provider: normalizeRouteEndpoint(association.provider),
+    status: association.status === 'RESOLVED' ? 'RESOLVED' : 'UNRESOLVED',
+    confidence: typeof association.confidence === 'number' ? association.confidence : 0,
+  }));
+  return { schemaVersion: 1, routes, truncated: associations.length > routes.length };
+}
+
+function normalizeRouteEndpoint(endpoint) {
+  if (!endpoint) return null;
+  return {
+    repository: endpoint.repository ?? null,
+    symbolUid: endpoint.symbolUid ?? null,
+    symbolRef: endpoint.symbolRef ? {
+      name: endpoint.symbolRef.name ?? null,
+      filePath: safeFilePath(endpoint.symbolRef.filePath),
+      startLine: endpoint.symbolRef.startLine ?? null,
+      endLine: endpoint.symbolRef.endLine ?? null,
+    } : null,
   };
 }
 

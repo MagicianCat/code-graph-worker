@@ -13,6 +13,16 @@
 - Query/Context/Impact/Trace 标准 DTO。
 - 显式 HTTP route prefix manifest，解决 axios baseURL 与后端路由前缀分离的问题。
 
+## M4 增量与多仓复用
+
+Build 请求可以携带 `reusePlan` 和 `baseBundleArtifactUri/baseBundleSha256`。平台为每个仓库声明 `EXACT`、`INCREMENTAL` 或 `FULL`：
+
+- `EXACT`：恢复对应仓库的 `.gitnexus`，校验 commit/tree 一致，不执行 Analyze。
+- `INCREMENTAL`：恢复 base `.gitnexus`，校验 base commit 是目标 commit 的祖先，再执行 GitNexus Analyze。
+- `FULL`：从目标源码重新 Analyze。
+
+所有仓库准备完成后才执行 Group Sync；任一仓库失败不会发布 Bundle。Worker 不自行选择 base，也不接受未经过平台指纹和权限校验的快照。
+
 ## 本地运行
 
 ```bash

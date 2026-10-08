@@ -53,6 +53,7 @@ export async function createApplication(config = loadConfig()) {
       const queryRoutes = new Map([
         ['/internal/code-graph/query', 'query'], ['/internal/code-graph/context', 'context'],
         ['/internal/code-graph/impact', 'impact'], ['/internal/code-graph/trace', 'trace'],
+        ['/internal/code-graph/overview', 'overview'], ['/internal/code-graph/route-map', 'route-map'],
       ]);
       if (request.method === 'POST' && queryRoutes.has(url.pathname)) {
         return send(response, 200, await queryService.run(queryRoutes.get(url.pathname), await readJson(request)));
