@@ -62,3 +62,34 @@ test('executes the pinned adapter operations with argument arrays', async () => 
   assert.deepEqual(registry.contracts, []);
   await fs.rm(root, { recursive: true, force: true });
 });
+
+test('reuses an intact registry entry without removing its live cache storage', async () => {
+  const { root, adapter } = await fakeAdapter();
+  const repoPath = path.join(root, 'cache', 'bundle-repo');
+  await fs.mkdir(path.join(repoPath, '.gitnexus'), { recursive: true });
+  const owned = JSON.stringify({ sentinel: true, repoPath, storagePath: path.join(repoPath, '.gitnexus') });
+  await fs.writeFile(path.join(repoPath, '.gitnexus', 'meta.json'), owned);
+  await fs.writeFile(path.join(repoPath, '.gitnexus', 'gitnexus.json'), owned);
+  await fs.writeFile(path.join(root, 'registry.json'), JSON.stringify([{ name: 'bundle-repo', path: repoPath }]));
+
+  assert.equal(await adapter.registerExisting(repoPath, 'bundle-repo'), repoPath);
+  assert.equal(JSON.parse(await fs.readFile(path.join(repoPath, '.gitnexus', 'meta.json'))).sentinel, true);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('drops a foreign exact registry entry without deleting the restored index', async () => {
+  const { root, adapter } = await fakeAdapter();
+  const repoPath = path.join(root, 'cache', 'bundle-repo');
+  await fs.mkdir(path.join(repoPath, '.gitnexus'), { recursive: true });
+  const foreign = JSON.stringify({ repoPath: '/old/work/repo', storagePath: '/old/work/repo/.gitnexus' });
+  await fs.writeFile(path.join(repoPath, '.gitnexus', 'meta.json'), foreign);
+  await fs.writeFile(path.join(repoPath, '.gitnexus', 'gitnexus.json'), foreign);
+  await fs.writeFile(path.join(root, 'registry.json'), JSON.stringify([{ name: 'bundle-repo', path: repoPath }]));
+
+  assert.equal(await adapter.registerExisting(repoPath, 'bundle-repo'), repoPath);
+  const restored = JSON.parse(await fs.readFile(path.join(repoPath, '.gitnexus', 'meta.json')));
+  assert.equal(restored.repoPath, repoPath);
+  assert.equal(restored.storagePath, path.join(repoPath, '.gitnexus'));
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'registry.json'))), []);
+  await fs.rm(root, { recursive: true, force: true });
+});

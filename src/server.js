@@ -8,6 +8,7 @@ import { ArtifactStore } from './artifact-store.js';
 import { JobStore } from './job-store.js';
 import { BuildService } from './build-service.js';
 import { QueryService } from './query-service.js';
+import { SemanticExportService } from './semantic-export.js';
 
 async function readJson(request) {
   let body = '';
@@ -36,17 +37,22 @@ export async function createApplication(config = loadConfig()) {
   await jobStore.initialize();
   const buildService = new BuildService(config, adapter, artifactStore, jobStore);
   const queryService = new QueryService(adapter, artifactStore, config.maxConcurrentQueries);
+  const semanticExportService = new SemanticExportService(adapter, artifactStore);
 
   return http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://worker.internal');
       if (request.method === 'GET' && url.pathname === '/internal/code-graph/health') {
-        return send(response, 200, { status: 'UP', workerVersion: '0.1.0', engine: 'GITNEXUS', engineVersion: config.gitnexusVersion });
+        return send(response, 200, { status: 'UP', workerVersion: '0.1.0', engine: 'GITNEXUS', engineVersion: config.gitnexusVersion,
+          pid: process.pid, uptimeSeconds: Math.round(process.uptime()), builds: buildService.metrics(), queries: queryService.metrics() });
       }
       if (request.headers.authorization !== `Bearer ${config.internalToken}`) throw new WorkerError('UNAUTHORIZED', 'Unauthorized', { status: 401 });
       if (request.method === 'POST' && url.pathname === '/internal/code-graph/build') {
         const job = await buildService.submit(await readJson(request), request.headers['idempotency-key']);
         return send(response, 202, { schemaVersion: 1, engineJobId: job.engineJobId, status: job.status, acceptedAt: job.createdAt });
+      }
+      if (request.method === 'POST' && url.pathname === '/internal/code-graph/semantic-export') {
+        return send(response, 200, await semanticExportService.export(await readJson(request)));
       }
       const jobMatch = request.method === 'GET' && url.pathname.match(/^\/internal\/code-graph\/jobs\/([0-9a-f-]+)$/);
       if (jobMatch) return send(response, 200, await buildService.get(jobMatch[1]));

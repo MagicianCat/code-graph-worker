@@ -44,9 +44,31 @@ export class ArtifactStore {
     const target = path.join(this.config.cacheRoot, cacheKey);
     try {
       await fs.access(path.join(target, 'metadata.json'));
-      const now = new Date();
-      await fs.utimes(target, now, now);
-      return target;
+      // A previous crash between the top-level extraction step and a repo's
+      // .gitnexus payload write can leave the cache directory half-populated:
+      // metadata.json exists but repositories/<name>/.gitnexus is missing.
+      // Verify per-repo integrity before declaring the cache hit, otherwise
+      // downstream consumers fail with an opaque ENOENT in #registerExisting.
+      const metadata = JSON.parse(await fs.readFile(path.join(target, 'metadata.json'), 'utf8'));
+      const repos = Array.isArray(metadata.repositories) ? metadata.repositories : [];
+      let intact = true;
+      for (const repo of repos) {
+        const name = repo?.logicalName;
+        if (!name) { intact = false; break; }
+        try {
+          await fs.access(path.join(target, 'repositories', name, '.gitnexus', 'meta.json'));
+        } catch {
+          intact = false;
+          break;
+        }
+      }
+      if (intact) {
+        const now = new Date();
+        await fs.utimes(target, now, now);
+        return target;
+      }
+      console.log('[artifact-store] cache INCOMPLETE, re-extracting:', target, 'missing repo:', repos.find(r => r?.logicalName && !intact)?.logicalName);
+      // Half-populated cache — fall through and re-extract from the archive.
     } catch {}
     await this.#evictCache();
     const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -69,9 +91,14 @@ export class ArtifactStore {
     }
     if (extractedBytes > this.config.maxExtractedBytes) throw new WorkerError('ENGINE_INDEX_INVALID', 'Graph artifact expands beyond configured limit');
     await runProcess('tar', ['--use-compress-program=zstd', '--no-same-owner', '-xf', archive, '-C', temporary], { timeoutMs: this.config.buildTimeoutMs });
+    // `rename` refuses to replace a non-empty directory on Linux, so an
+    // existing (half-populated) cache directory makes the atomic swap fail
+    // with ENOTEMPTY/EEXIST. Remove the stale target before retrying once —
+    // the archive is the source of truth and we just verified its checksum.
     await fs.rename(temporary, target).catch(async (error) => {
       if (error.code !== 'EEXIST' && error.code !== 'ENOTEMPTY') throw error;
-      await fs.rm(temporary, { recursive: true, force: true });
+      await fs.rm(target, { recursive: true, force: true });
+      await fs.rename(temporary, target);
     });
     return target;
   }

@@ -58,7 +58,9 @@ export function runProcess(binary, args, { cwd, env, timeoutMs = 10_000, allowEx
       } else if (!allowExitCodes.includes(exitCode)) {
         reject(new WorkerError('ENGINE_ANALYZE_FAILED', `${binary} exited with code ${exitCode}`, {
           retryable: true,
-          details: { exitCode, signal, stderr: stderr.slice(-4_000) },
+          // Include stdout too — GitNexus cypher puts binder/parser errors in
+          // stdout (not stderr), so a bare banner in stderr hides the root cause.
+          details: { exitCode, signal, stderr: stderr.slice(-4_000), stdout: stdout.slice(-4_000) },
         }));
       } else {
         resolve({ stdout, stderr, exitCode });

@@ -20,6 +20,10 @@ export class BuildService {
     this.submitLock = Promise.resolve();
   }
 
+  metrics() {
+    return { running: this.running, queued: this.queue.length, maxConcurrent: this.config.maxConcurrentBuilds, maxQueued: this.config.maxQueuedBuilds };
+  }
+
   async submit(request, idempotencyKey) {
     const previous = this.submitLock;
     let release;

@@ -12,6 +12,10 @@ export class QueryService {
     this.activeQueries = 0;
   }
 
+  metrics() {
+    return { running: this.activeQueries, maxConcurrent: this.maxConcurrentQueries };
+  }
+
   async run(operation, request) {
     if (!['overview', 'query', 'context', 'impact', 'trace', 'route-map'].includes(operation)) throw new WorkerError('INVALID_REQUEST', 'Unsupported query operation', { status: 400 });
     if (this.activeQueries >= this.maxConcurrentQueries) throw new WorkerError('BUILD_CAPACITY_EXCEEDED', 'Query capacity is full', { status: 429, retryable: true });
@@ -43,8 +47,23 @@ export class QueryService {
   }
 
   async overview(request) {
-    const { metadata } = await this.#resolveMetadata(request);
-    return normalizeOverview(metadata);
+    const { metadata, root } = await this.#resolveMetadata(request);
+    // Older bundles (including bundles produced before M7) did not copy the
+    // GitNexus statistics into metadata.json.  The stats are still part of
+    // each immutable repository index, so enrich the public overview from the
+    // co-located .gitnexus/meta.json instead of reporting an empty graph.
+    const repositories = await Promise.all((metadata.repositories ?? []).map(async (repository) => {
+      try {
+        const indexMetadata = JSON.parse(await fs.readFile(path.join(root, 'repositories', repository.logicalName, '.gitnexus', 'meta.json'), 'utf8'));
+        const stats = indexMetadata.stats ?? {};
+        return { ...repository,
+          nodeCount: Number.isFinite(repository.nodeCount) ? repository.nodeCount : (Number.isFinite(stats.nodes) ? stats.nodes : null),
+          edgeCount: Number.isFinite(repository.edgeCount) ? repository.edgeCount : (Number.isFinite(stats.edges) ? stats.edges : null),
+          fileCount: Number.isFinite(repository.fileCount) ? repository.fileCount : (Number.isFinite(stats.files) ? stats.files : null),
+        };
+      } catch { return repository; }
+    }));
+    return normalizeOverview({ ...metadata, repositories });
   }
 
   async routeMap(request) {
@@ -69,7 +88,7 @@ export class QueryService {
     validateGraphRequest(request);
     const root = await this.artifactStore.materialize(request.graph.bundleArtifactUri, request.graph.bundleSha256);
     try {
-      return { metadata: JSON.parse(await fs.readFile(path.join(root, 'metadata.json'), 'utf8')) };
+      return { root, metadata: JSON.parse(await fs.readFile(path.join(root, 'metadata.json'), 'utf8')) };
     } catch {
       throw new WorkerError('ENGINE_INDEX_INVALID', 'Graph artifact metadata is invalid', { status: 422 });
     }

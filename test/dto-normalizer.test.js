@@ -38,9 +38,12 @@ test('normalizes context directions into relations', () => {
   const result = normalizeContext({
     symbol: { uid: 'Class:a.java:A', kind: 'Class', name: 'A', filePath: 'a.java' },
     incoming: { imports: [{ uid: 'File:b.java', name: 'b.java', filePath: 'b.java' }] },
-    outgoing: { has_method: [{ uid: 'Method:a.java:A.run#0', name: 'run', filePath: 'a.java' }] },
+    outgoing: {
+      has_method: [{ uid: 'Method:a.java:A.run#0', name: 'run', filePath: 'a.java' }],
+      has_property: [{ uid: 'Property:a.java:A.value', name: 'value', filePath: 'a.java' }],
+    },
   }, 'backend');
-  assert.deepEqual(result.relations.map((item) => item.type), ['IMPORTS', 'CONTAINS']);
+  assert.deepEqual(result.relations.map((item) => item.type), ['IMPORTS', 'HAS_METHOD', 'HAS_PROPERTY']);
   assert.equal(result.relations[0].toUid, 'Class:a.java:A');
 });
 

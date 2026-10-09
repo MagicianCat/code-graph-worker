@@ -53,6 +53,7 @@ export function normalizeOverview(metadata) {
     treeSha: repository.treeSha,
     buildMode: repository.buildMode ?? 'FULL',
     baseCommitSha: repository.baseCommitSha ?? null,
+    fileCount: Number.isFinite(repository.fileCount) ? repository.fileCount : null,
     nodeCount: Number.isFinite(repository.nodeCount) ? repository.nodeCount : null,
     edgeCount: Number.isFinite(repository.edgeCount) ? repository.edgeCount : null,
   }));
@@ -66,6 +67,12 @@ export function normalizeOverview(metadata) {
     group: metadata.group ? {
       engineCrossLinkCount: Number.isFinite(metadata.group.engineCrossLinkCount) ? metadata.group.engineCrossLinkCount : 0,
     } : null,
+    counts: {
+      repositories: repositories.length,
+      files: repositories.reduce((sum, repository) => sum + (repository.fileCount ?? 0), 0),
+      symbols: repositories.reduce((sum, repository) => sum + (repository.nodeCount ?? 0), 0),
+      relations: repositories.reduce((sum, repository) => sum + (repository.edgeCount ?? 0), 0),
+    },
     routeNormalization: metadata.routeNormalization ? {
       version: metadata.routeNormalization.version ?? 1,
       explicitLinkCount: metadata.routeNormalization.explicitLinkCount ?? 0,
@@ -119,7 +126,10 @@ export function normalizeContext(raw, repository) {
   const target = normalizeSymbol(raw.symbol, repository);
   const symbols = [];
   const relations = [];
-  const relationMap = { imports: 'IMPORTS', accesses: 'ACCESSES', calls: 'CALLS', has_method: 'CONTAINS' };
+  const relationMap = {
+    imports: 'IMPORTS', accesses: 'ACCESSES', calls: 'CALLS', contains: 'CONTAINS',
+    has_method: 'HAS_METHOD', has_property: 'HAS_PROPERTY',
+  };
   for (const [direction, groups] of [['incoming', raw.incoming ?? {}], ['outgoing', raw.outgoing ?? {}]]) {
     for (const [engineType, values] of Object.entries(groups)) {
       const type = relationMap[engineType] ?? 'UNKNOWN';

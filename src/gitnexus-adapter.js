@@ -4,10 +4,19 @@ import { WorkerError } from './errors.js';
 import { runProcess } from './process-runner.js';
 
 function parseJsonOutput(stdout) {
-  const start = stdout.indexOf('{');
-  const end = stdout.lastIndexOf('}');
-  if (start < 0 || end < start) throw new WorkerError('ENGINE_INDEX_INVALID', 'GitNexus did not return JSON', { details: { stdout: stdout.slice(-2_000) } });
-  return JSON.parse(stdout.slice(start, end + 1));
+  // GitNexus emits `{...}` for object results and `[]` for empty list results.
+  // Accept either shape.
+  const objectStart = stdout.indexOf('{');
+  const objectEnd = stdout.lastIndexOf('}');
+  if (objectStart >= 0 && objectEnd >= objectStart) {
+    return JSON.parse(stdout.slice(objectStart, objectEnd + 1));
+  }
+  const arrayStart = stdout.indexOf('[');
+  const arrayEnd = stdout.lastIndexOf(']');
+  if (arrayStart >= 0 && arrayEnd >= arrayStart) {
+    return JSON.parse(stdout.slice(arrayStart, arrayEnd + 1));
+  }
+  throw new WorkerError('ENGINE_INDEX_INVALID', 'GitNexus did not return JSON', { details: { stdout: stdout.slice(-2_000) } });
 }
 
 export class GitNexusAdapter {
@@ -20,6 +29,7 @@ export class GitNexusAdapter {
       GITNEXUS_WORKER_POOL_SIZE: String(config.workerPoolSize),
     };
     this.registrationPromises = new Map();
+    this.registrationTail = Promise.resolve();
   }
 
   async version() {
@@ -45,28 +55,58 @@ export class GitNexusAdapter {
   async registerExisting(repoPath, alias = path.basename(repoPath)) {
     const key = `${repoPath}\0${alias}`;
     if (this.registrationPromises.has(key)) return this.registrationPromises.get(key);
-    const registration = this.#registerExisting(repoPath, alias).catch((error) => {
+    // GitNexus owns one process-wide registry file. Serialize registration for
+    // different repositories so concurrent semantic backfills cannot race its
+    // read-modify-write cycle.
+    const registration = this.registrationTail.then(() => this.#registerExisting(repoPath, alias)).catch((error) => {
       this.registrationPromises.delete(key);
       throw error;
     });
+    this.registrationTail = registration.catch(() => undefined);
     this.registrationPromises.set(key, registration);
     return registration;
   }
 
   async #registerExisting(repoPath, alias) {
+    // The same alias can appear under multiple cache paths when the worker
+    // serves different bundles that share a repository logical name. GitNexus
+    // refuses to pick one when the registry holds duplicates
+    // (RegistryAmbiguousTargetError), so before registering the fresh
+    // materialization we drop every existing entry for this alias. Removal is
+    // idempotent and targets the alias, not the path.
+    // A previous worker process may already have registered this exact cache
+    // path. `gitnexus remove` also deletes that path's `.gitnexus` directory,
+    // so removing-and-reregistering an exact match destroys the live cache.
+    // Reuse it as-is; bundle-scoped aliases make the identity immutable.
+    if (await this.#removeAliasIfPresent(alias, repoPath)) return repoPath;
+    // The restored .gitnexus directory carries the ORIGINAL build's absolute
+    // repoPath/storagePath — but the registry now lives at a different path
+    // (a cache location). GitNexus validates storage ownership by checking
+    // the recorded paths against the live ones, so an unrestored mismatch
+    // makes `gitnexus index` reject the storage as "foreign". Rewrite the
+    // storage identity in place before invoking `index` so the restored
+    // directory is recognised as its own.
     const storagePath = path.join(repoPath, '.gitnexus');
     for (const fileName of ['meta.json', 'gitnexus.json']) {
       const metadataPath = path.join(storagePath, fileName);
       const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
       metadata.repoPath = repoPath;
       metadata.storagePath = storagePath;
+      // Strip the recorded runner identity so the restored storage is
+      // evaluated against the current runner, not the original build's.
+      // Without this, GitNexus treats the storage as foreign and refuses
+      // to register it.
+      if (metadata.runnerIdentity) metadata.runnerIdentity.current = null;
       const temporary = `${metadataPath}.${process.pid}.tmp`;
       await fs.writeFile(temporary, JSON.stringify(metadata, null, 2), { mode: 0o600 });
       await fs.rename(temporary, metadataPath);
     }
-    if (path.basename(repoPath) !== alias) {
-      throw new WorkerError('ENGINE_INDEX_INVALID', 'Restored GitNexus repository path does not match its registry alias');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(alias)) {
+      throw new WorkerError('ENGINE_INDEX_INVALID', 'Registry alias is invalid');
     }
+    // The alias may intentionally differ from path.basename(repoPath) when the
+    // caller needs a bundle-scoped registry name (multiple bundles sharing a
+    // repository logical name must not collide in the GitNexus registry).
     // GitNexus 1.6.12 `index` has no `--name` option and otherwise infers the
     // registry name from origin. Point the isolated working copy at a
     // synthetic local identity whose basename is the job-scoped alias. This
@@ -83,6 +123,46 @@ export class GitNexusAdapter {
       timeoutMs: this.config.queryTimeoutMs,
     });
     return repoPath;
+  }
+
+  /**
+   * Drops every registry entry bound to `alias`. GitNexus' `remove` command
+   * refuses to delete by alias when multiple entries match
+   * (RegistryAmbiguousTargetError), so we read the registry file directly,
+   * collect every path registered under this alias, and remove each one by
+   * its absolute path — which `remove` accepts as a disambiguator.
+   */
+  async #removeAliasIfPresent(alias, repoPath) {
+    const registryPath = path.join(this.config.gitnexusHome, 'registry.json');
+    let entries;
+    try {
+      entries = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+    } catch (readError) {
+      if (readError.code === 'ENOENT') return false; // registry has never been written
+      throw readError;
+    }
+    if (!Array.isArray(entries)) return false;
+    const duplicates = entries.filter((entry) => entry && entry.name === alias && typeof entry.path === 'string');
+    const normalizedRepoPath = path.resolve(repoPath);
+    if (duplicates.some((entry) => path.resolve(entry.path) === normalizedRepoPath)) {
+      try {
+        const metadata = JSON.parse(await fs.readFile(path.join(repoPath, '.gitnexus', 'meta.json'), 'utf8'));
+        const ownedStorage = path.join(normalizedRepoPath, '.gitnexus');
+        if (path.resolve(metadata.repoPath ?? '') === normalizedRepoPath
+            && path.resolve(metadata.storagePath ?? '') === ownedStorage) return true;
+      } catch { /* stale exact registry entry; clean it below */ }
+    }
+    if (duplicates.length > 0) {
+      // Do not invoke `gitnexus remove`: it deletes the registered path's
+      // `.gitnexus` directory, which in this case is our immutable artifact
+      // cache. Atomically forget only the stale registry rows; the next
+      // `gitnexus index` process will rebuild them from the restored storage.
+      const retained = entries.filter((entry) => !(entry && entry.name === alias));
+      const temporary = `${registryPath}.${process.pid}.tmp`;
+      await fs.writeFile(temporary, JSON.stringify(retained, null, 2), { mode: 0o600 });
+      await fs.rename(temporary, registryPath);
+    }
+    return false;
   }
 
   async validate(alias, expectedCommit, allowRestoredIdentity = false) {
@@ -102,6 +182,11 @@ export class GitNexusAdapter {
 
   async query(alias, query, limit = 20) {
     const result = await runProcess(this.config.gitnexusBin, ['query', '-r', alias, query, '--limit', String(limit)], { env: this.env, timeoutMs: this.config.queryTimeoutMs });
+    return parseJsonOutput(result.stdout);
+  }
+
+  async cypher(alias, query, limit = 100) {
+    const result = await runProcess(this.config.gitnexusBin, ['cypher', '-r', alias, query, '--limit', String(limit)], { env: this.env, timeoutMs: this.config.queryTimeoutMs });
     return parseJsonOutput(result.stdout);
   }
 
