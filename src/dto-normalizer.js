@@ -66,6 +66,24 @@ export function normalizeOverview(metadata) {
     repositories,
     group: metadata.group ? {
       engineCrossLinkCount: Number.isFinite(metadata.group.engineCrossLinkCount) ? metadata.group.engineCrossLinkCount : 0,
+      workspaceCrossLinkCount: Number.isFinite(metadata.group.workspaceCrossLinkCount) ? metadata.group.workspaceCrossLinkCount : 0,
+      repositoryDependencyCount: Number.isFinite(metadata.group.repositoryDependencyCount) ? metadata.group.repositoryDependencyCount : 0,
+      repositoryDependencies: (metadata.group.repositoryDependencies ?? []).map((dependency) => ({
+        from: dependency.from ?? null,
+        to: dependency.to ?? null,
+        type: dependency.type ?? 'DEPENDS_ON',
+        source: dependency.source ?? 'GITNEXUS_WORKSPACE',
+        evidenceCount: dependency.evidenceCount ?? 0,
+        evidence: (dependency.evidence ?? []).map((link) => ({
+          id: link.id ?? null,
+          from: link.from ?? null,
+          to: link.to ?? null,
+          type: link.type ?? null,
+          matchType: link.matchType ?? null,
+          contractId: link.contractId ?? null,
+          confidence: link.confidence ?? null,
+        })),
+      })),
     } : null,
     counts: {
       repositories: repositories.length,

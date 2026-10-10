@@ -15,7 +15,7 @@ else if (args[0] === 'group' && args[1] === 'create') {
   const name = args[2];
   const directory = path.join(process.env.GITNEXUS_HOME, 'groups', name);
   fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(path.join(directory, 'group.yaml'), `version: 1\nname: ${name}\nrepos: {}\nlinks: []\n`);
+  fs.writeFileSync(path.join(directory, 'group.yaml'), `version: 1\nname: ${name}\ndetect:\n  http: true\nrepos: {}\nlinks: []\n`);
 } else if (args[0] === 'group' && args[1] === 'sync') {
   const name = args[2];
   const directory = path.join(process.env.GITNEXUS_HOME, 'groups', name);

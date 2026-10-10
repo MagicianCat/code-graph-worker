@@ -220,6 +220,16 @@ export class GitNexusAdapter {
     for (const repository of repositories) {
       await runProcess(this.config.gitnexusBin, ['group', 'add', name, repository.logicalName, repository.alias], { env: this.env, timeoutMs: this.config.queryTimeoutMs });
     }
+    // GitNexus keeps workspace dependency detection disabled in the default
+    // group template. Enable it before sync so Java Maven/Gradle coordinates
+    // can produce native workspace cross-links.
+    const groupYamlPath = path.join(this.config.gitnexusHome, 'groups', name, 'group.yaml');
+    const yaml = await fs.readFile(groupYamlPath, 'utf8');
+    if (!/^detect:[ \t]*$/m.test(yaml)) throw new WorkerError('ENGINE_INDEX_INVALID', 'GitNexus group detect config not found');
+    const updatedYaml = /^  workspace_deps:[ \t]*(?:true|false)[ \t]*$/m.test(yaml)
+      ? yaml.replace(/^  workspace_deps:[ \t]*(?:true|false)[ \t]*$/m, '  workspace_deps: true')
+      : yaml.replace(/^detect:[ \t]*$/m, 'detect:\n  workspace_deps: true');
+    await fs.writeFile(groupYamlPath, updatedYaml, { mode: 0o600 });
     await runProcess(this.config.gitnexusBin, ['group', 'sync', name, '--json'], { env: this.env, timeoutMs: Math.min(this.config.buildTimeoutMs, 600_000) });
     return JSON.parse(await fs.readFile(path.join(this.config.gitnexusHome, 'groups', name, 'contracts.json'), 'utf8'));
   }

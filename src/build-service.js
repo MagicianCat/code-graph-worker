@@ -7,6 +7,51 @@ import { resolveRouteAssociations } from './route-normalizer.js';
 import { validateBuildRequest } from './validation.js';
 import { runProcess } from './process-runner.js';
 
+function safeLinkSymbol(symbol) {
+  if (!symbol) return null;
+  return {
+    name: symbol.name ?? null,
+    uid: symbol.uid ?? null,
+    filePath: typeof symbol.filePath === 'string' && !symbol.filePath.startsWith('/') ? symbol.filePath : null,
+  };
+}
+
+function normalizeWorkspaceCrossLinks(crossLinks) {
+  return (crossLinks ?? []).map((link, index) => ({
+    id: `${link.contractId ?? 'cross-link'}-${index}`,
+    from: {
+      repository: link.from?.repo ?? null,
+      symbolUid: link.from?.symbolUid ?? null,
+      symbolRef: safeLinkSymbol(link.from?.symbolRef),
+    },
+    to: {
+      repository: link.to?.repo ?? null,
+      symbolUid: link.to?.symbolUid ?? null,
+      symbolRef: safeLinkSymbol(link.to?.symbolRef),
+    },
+    type: link.type ?? null,
+    matchType: link.matchType ?? null,
+    contractId: link.contractId ?? null,
+    confidence: typeof link.confidence === 'number' ? link.confidence : null,
+  }));
+}
+
+function aggregateRepositoryDependencies(crossLinks) {
+  const groups = new Map();
+  for (const link of crossLinks) {
+    if (link.type !== 'custom' || link.matchType !== 'manifest') continue;
+    const from = link.from?.repository;
+    const to = link.to?.repository;
+    if (!from || !to || from === to) continue;
+    const key = `${from}\0${to}`;
+    const current = groups.get(key) ?? { from, to, type: 'DEPENDS_ON', source: 'GITNEXUS_WORKSPACE', evidenceCount: 0, evidence: [] };
+    current.evidenceCount += 1;
+    current.evidence.push(link);
+    groups.set(key, current);
+  }
+  return [...groups.values()];
+}
+
 export class BuildService {
   constructor(config, adapter, artifactStore, jobStore, materialize = materializeRepository, processRunner = runProcess) {
     this.config = config;
@@ -177,7 +222,17 @@ export class BuildService {
           resolvedLinkCount: routeAssociations.filter((link) => link.status === 'RESOLVED').length,
           associations: routeAssociations,
         },
-        group: group ? { engineCrossLinkCount: group.crossLinks?.length ?? 0 } : null,
+        group: group ? (() => {
+          const crossLinks = normalizeWorkspaceCrossLinks(group.crossLinks);
+          const repositoryDependencies = aggregateRepositoryDependencies(crossLinks);
+          return {
+            engineCrossLinkCount: crossLinks.length,
+            workspaceCrossLinkCount: crossLinks.filter((link) => link.type === 'custom' && link.matchType === 'manifest').length,
+            crossLinks,
+            repositoryDependencies,
+            repositoryDependencyCount: repositoryDependencies.length,
+          };
+        })() : null,
         createdAt: new Date().toISOString(),
       };
       await this.#update(job, { currentStep: 'ARCHIVE', progress: 85 });

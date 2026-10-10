@@ -53,3 +53,23 @@ test('normalizes overview and redacts absolute engine paths in route map', () =>
   const routes = normalizeRouteMap({ routeNormalization: { associations: [{ originalContractId: 'http::GET::/x', normalizedContractId: 'http::GET::/x', consumer: { repository: 'frontend', symbolUid: 'Function:x', symbolRef: { filePath: '/private/tmp/source/a.ts', name: 'x' } }, provider: null, status: 'UNRESOLVED', confidence: 0 }] } });
   assert.equal(routes.routes[0].consumer.symbolRef.filePath, '');
 });
+
+test('normalizes workspace cross-links into repository dependencies', () => {
+  const overview = normalizeOverview({
+    engine: 'GITNEXUS', engineVersion: '1.6.12', adapterVersion: '0.1.0', repositories: [],
+    group: {
+      engineCrossLinkCount: 2,
+      workspaceCrossLinkCount: 2,
+      repositoryDependencyCount: 2,
+      repositoryDependencies: [{
+        from: 'Service', to: 'java-faker', type: 'DEPENDS_ON', source: 'GITNEXUS_WORKSPACE', evidenceCount: 1,
+        evidence: [{ contractId: 'custom::javafaker::Faker', matchType: 'manifest' }],
+      }, {
+        from: 'java-faker', to: 'snakeyaml', type: 'DEPENDS_ON', source: 'GITNEXUS_WORKSPACE', evidenceCount: 1, evidence: [],
+      }],
+    },
+  });
+  assert.equal(overview.group.repositoryDependencyCount, 2);
+  assert.deepEqual(overview.group.repositoryDependencies.map((item) => [item.from, item.to]), [['Service', 'java-faker'], ['java-faker', 'snakeyaml']]);
+  assert.equal(overview.group.repositoryDependencies[0].evidence[0].matchType, 'manifest');
+});
